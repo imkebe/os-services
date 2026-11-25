@@ -397,6 +397,11 @@ pub struct ServiceReplier {
 }
 
 impl ServiceReplier {
+    /// Registers or withdraws a service that runs on its own thread.
+    pub fn register(&self, registration: Registration) {
+        self.send(Command::Register(registration));
+    }
+
     pub fn reply(&self, reply: ServiceReply) {
         self.queued_output
             .fetch_add(terminal_output_len(&reply), Ordering::Relaxed);
@@ -492,7 +497,7 @@ impl Worker {
     }
 
     pub fn register(&self, registration: Registration) {
-        self.replier.send(Command::Register(registration));
+        self.replier.register(registration);
     }
 
     #[cfg(not(target_os = "linux"))]

@@ -26,6 +26,9 @@
   "objc2-foundation": [
     "objc2-MIT.txt"
   ],
+  "objc2-io-kit": [
+    "objc2-MIT.txt"
+  ],
   "objc2-io-surface": [
     "objc2-MIT.txt"
   ],

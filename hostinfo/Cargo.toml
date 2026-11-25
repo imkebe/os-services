@@ -1,0 +1,36 @@
+[package]
+name = "ipkvm-hostinfo"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+license-file = "../LICENSE"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "ipkvm_hostinfo"
+path = "src/lib.rs"
+
+# The standalone collector, for a computer without the full OS Services
+# program (FreeBSD, NetBSD): it prints the same JSON, once or as JSON Lines.
+[[bin]]
+name = "hostinfo"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 0.38 is the newest line that builds with the pinned Rust 1.92: 0.39 and
+# 0.40 need Rust 1.95.
+sysinfo = { version = "0.38", default-features = false, features = ["system", "disk", "network", "component", "user"] }
+
+# The USB device list. nusb only enumerates here; no device is opened.
+[target.'cfg(any(windows, target_os = "macos", target_os = "linux"))'.dependencies]
+nusb = "0.2"
+
+# The display adapters, from DXGI; their load, from the GPU performance
+# counters (PDH).
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["dxgi", "guiddef", "minwindef", "ntdef", "pdh", "unknwnbase", "winerror"] }

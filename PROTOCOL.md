@@ -1,6 +1,6 @@
 # IP-KVM OS Services protocol
 
-Version 5.0. This protocol lets a program on the target computer give a KVM video, clipboard, terminal, file transfer and updates, over the KVM's USB cable.
+Version 5.1. This protocol lets a program on the target computer give a KVM video, clipboard, terminal, file transfer, updates and information about the target, over the KVM's USB cable.
 
 A session works in four steps:
 
@@ -30,6 +30,13 @@ Integers are little-endian. Text is UTF-8 without a terminator. Payload fields c
 The video service uses terms from the H.264 and H.265 specifications: access unit, NAL (network abstraction layer) unit, VCL (video coding layer) NAL unit, IDR (instantaneous decoder refresh), CRA (clean random access), and the parameter sets VPS, SPS and PPS (video, sequence and picture parameter set). Annex B is the byte-stream format with start codes.
 
 **Versions.** A version has a major and a minor number. The sender offers its version in `session.hello`. The KVM accepts only the same major number, and returns the lower of the two minor numbers in `session.ready`. A minor version adds only compatible features. Within a version, capabilities messages announce the optional features.
+
+| Version | Adds |
+|---|---|
+| 5.0 | The first version of major version 5. |
+| 5.1 | The [host info service](#host-info-service) and the `hostinfo_enabled` member of `session.config`. |
+
+A sender of version 5.1 accepts a `session.ready` with minor version 0 or 1.
 
 ## Transport
 
@@ -108,6 +115,8 @@ Every message starts with an 8-byte envelope:
 | 3 | Terminal |
 | 4 | File |
 | 5 | Update |
+| 6 | Reserved. It was the camera service; a receiver skips its messages. |
+| 7 | Host info |
 
 A `video.frame` payload is at most 8 MiB (8,388,608 bytes). All other payloads are at most 64 KiB (65,536 bytes).
 
@@ -184,6 +193,7 @@ The KVM owns the session policy, and the sender has none of its own. The KVM sen
 | `files_enabled` | boolean | File reception is allowed. |
 | `capture_display` | string | The display to capture, by a name from `session.info`. If it is empty, the sender selects the display. |
 | `display_mode_by_sender` | boolean | Optional. False if it is not present. It does not change during a session. If it is true, the KVM accepts bit 2 of `codec_flags` in `video.capabilities` (see [Display mode](#display-mode)). |
+| `hostinfo_enabled` | boolean | Optional. False if it is not present. The [host info service](#host-info-service) is allowed. |
 
 `terminal_enabled`, `files_enabled` and `capture_display` are required. The sender ignores unknown members, and applies each change immediately:
 
@@ -226,7 +236,7 @@ Every service except the session service is off until the sender registers it wi
 - A capabilities message with all flags zero withdraws the service. For video, all 16 bytes are zero. Before it withdraws a service, the sender ends the activity of that service.
 - A service that does not register is not available during the session.
 
-The KVM answers `video.capabilities` with `video.config`, and `clipboard.capabilities` with `clipboard.config`. The terminal, file and update services get no answer. If `video.config` does not arrive in 15 seconds, the sender ends the session.
+The KVM answers `video.capabilities` with `video.config` and `clipboard.capabilities` with `clipboard.config`. The terminal, file, update and host info services get no answer. If `video.config` does not arrive in 15 seconds, the sender ends the session.
 
 ## Video service
 
@@ -600,6 +610,165 @@ In `update.capabilities`, bit 0 of `flags` is install, and the other bits are ze
 - Credit and chunks follow the rules of the file service. An invalid chunk ends the session. A chunk that breaks the offset, credit or size rules fails the update.
 - Every update ends with exactly one `update.status`. If an update does not end with Installing, the sender deletes the temporary file.
 - After Installing, the sender closes the session with reason 0 and sends no more messages. The new sender opens a new session, and its `session.info` reports the new version.
+
+## Host info service
+
+The host info service tells the KVM what the target is and what it is doing: an inventory, live metrics while somebody watches, and the lists of processes, top processes and USB devices on request. It is an optional service of version 5.1: a KVM or a sender that does not know it skips its messages. The sender reads everything with the rights of its user. It leaves a value empty when the target does not tell it without more rights.
+
+| Kind | Message | Direction | Purpose |
+|---:|---|---|---|
+| 1 | `hostinfo.capabilities` | Sender to KVM | Register or withdraw the service. |
+| 2 | `hostinfo.subscribe` | KVM to sender | Start, renew or stop the metrics. |
+| 3 | `hostinfo.inventory` | Sender to KVM | The inventory document. |
+| 4 | `hostinfo.metrics` | Sender to KVM | One metrics document. |
+| 5 | `hostinfo.query` | KVM to sender | Ask for one document. |
+| 6 | `hostinfo.result` | Sender to KVM | One chunk of the answer to a query. |
+
+The sender collects on its own thread, so that a slow sample delays no other service.
+
+### `hostinfo.capabilities`
+
+| Offset | Size | Field | Description |
+|---:|---:|---|---|
+| 0 | 4 | `sections` | Bit 0: inventory. Bit 1: metrics. Bit 2: processes and top processes. Bit 3: USB devices. |
+
+The sender registers the service only while `hostinfo_enabled` in `session.config` is true. When the member becomes false, the sender stops the metrics and sends `hostinfo.capabilities` with `sections` zero, which withdraws the service. A sender whose `session.config` never had the member true sends no `hostinfo.capabilities`.
+
+### `hostinfo.inventory`
+
+The payload is the inventory document as UTF-8 JSON, at most 64 KiB. The sender sends it once after `hostinfo.capabilities`. Then it reads the inventory again every 30 seconds and sends it only when the JSON differs from the one it sent last.
+
+### `hostinfo.subscribe`
+
+| Offset | Size | Field | Description |
+|---:|---:|---|---|
+| 0 | 4 | `interval_ms` | Time between two `hostinfo.metrics`. Zero stops the metrics. The sender uses 500 for a lower value. |
+| 4 | 4 | `flags` | Reserved. The KVM sends zero. The sender ignores all the bits. |
+
+The payload is exactly 8 bytes. A subscription expires 15 seconds after the last `hostinfo.subscribe`, so the KVM renews it every 5 seconds while somebody watches. A renewal with the same interval does not change the time of the next `hostinfo.metrics`. Without a subscription, the sender takes no periodic sample. The sender ignores `hostinfo.subscribe` while the service is not registered.
+
+Bit 0 of `flags` asked for a `top` array in the metrics in an early draft of version 5.1. It has no meaning now: the metrics never have `top`.
+
+### `hostinfo.metrics`
+
+The payload is a metrics document as UTF-8 JSON, at most 64 KiB. The sender sends one every `interval_ms` while a subscription is live. The first one follows one interval after the subscription starts, and its rates cover that interval.
+
+The sender does not read the list of processes for the metrics. Only a `hostinfo.query` for the processes or the top processes makes it do so.
+
+### `hostinfo.query`
+
+| Offset | Size | Field | Description |
+|---:|---:|---|---|
+| 0 | 4 | `request_id` | Returned in each `hostinfo.result`. |
+| 4 | 1 | `section` | 1 inventory, 2 processes, 3 USB devices, 4 top processes. |
+| 5 | 3 | `reserved` | Zero. The sender ignores them. |
+
+The payload is exactly 8 bytes. The KVM has one query open at a time, and gives it 5 seconds.
+
+A sender offers sections 2 and 4 together, with bit 2 of `hostinfo.capabilities`. A query for section 2 or section 4 makes the sender read its list of processes exactly once. Nothing else makes the sender read it. So the target pays for the list of processes only when somebody asks for it.
+
+### `hostinfo.result`
+
+| Offset | Size | Field | Description |
+|---:|---:|---|---|
+| 0 | 4 | `request_id` | From the query. |
+| 4 | 1 | `section` | From the query. |
+| 5 | 1 | `flags` | Bit 0: the last chunk. Bit 1: error. |
+| 6 | 2 | `reserved` | Zero. |
+| 8 | rest | `chunk` | At most 60 KiB (61,440 bytes) of the document. |
+
+The KVM joins the chunks of a `request_id` in the order they arrive, until the chunk with bit 0. A chunk boundary can split a UTF-8 character. The whole document is at most 1 MiB.
+
+With bit 1, the chunk is a UTF-8 message for the user and not JSON, and bit 0 is also set. The sender answers with an error when the service is off, when it does not know the section, and when the document is larger than 1 MiB.
+
+### Documents
+
+Each document is a JSON object with `"schema": 1`. A reader ignores members that it does not know. A value that the target does not tell is an empty string, zero, an empty array, or `null` where the tables say so. Sizes are in bytes as integers. Percentages are numbers from 0 to 100. Times are seconds since the Unix epoch, unless a member says otherwise.
+
+Inventory:
+
+```json
+{
+  "schema": 1,
+  "os": {"family": "linux", "name": "Ubuntu", "version": "24.04",
+         "kernel": "6.8.0-45-generic", "arch": "x86_64", "hostname": "box"},
+  "boot_time": 1795000000,
+  "cpu": {"brand": "", "vendor": "", "physical_cores": 8, "logical_cores": 16, "frequency_mhz": 3600},
+  "memory": {"total": 0, "swap_total": 0},
+  "gpus": [{"name": "", "vendor": "", "vram": 0, "driver": ""}],
+  "disks": [{"name": "", "mount": "", "fs": "", "total": 0, "available": 0, "removable": false}],
+  "networks": [{"name": "", "mac": "", "addresses": ["192.168.1.2/24"], "up": true}]
+}
+```
+
+- `os.family` is one of `windows`, `macos`, `linux`, `freebsd`, `netbsd`, `openbsd` and `other`.
+- `gpus[].vram` is the dedicated video memory. It is zero for an adapter that shares the main memory.
+- `disks` has one entry for each mount point.
+- `networks` omits loopback interfaces. An address has its prefix length.
+- A document that would be larger than 64 KiB loses entries from the end of its longest array until it fits.
+
+Metrics:
+
+```json
+{
+  "schema": 1,
+  "t": 1795000000000,
+  "uptime_s": 0,
+  "cpu": {"total": 12.5, "per_core": [10.0, 15.0]},
+  "load": [0.0, 0.0, 0.0],
+  "memory": {"used": 0, "total": 0, "swap_used": 0, "swap_total": 0},
+  "networks": [{"name": "", "rx_bps": 0, "tx_bps": 0, "rx_total": 0, "tx_total": 0}],
+  "disks": [{"mount": "", "total": 0, "available": 0}],
+  "temps": [{"label": "", "c": 45.0}],
+  "gpus": [{"name": "", "load": null, "vram_used": null}],
+  "process_count": 0
+}
+```
+
+- `t` is in milliseconds since the Unix epoch.
+- `load` has the load averages of 1, 5 and 15 minutes. Windows has none, and reports zeros.
+- `rx_bps` and `tx_bps` are bytes per second since the previous sample. `networks` omits loopback interfaces.
+- `disks` lists the mount points of the inventory.
+- `temps[].c` is in degrees Celsius.
+- `gpus` lists the adapters of the inventory, in its order. `load` is a percentage. `load` and `vram_used` are `null` when the target does not tell them without more rights.
+- `process_count` is the number of processes that the last query for section 2 or section 4 found. It is zero before the first such query. The metrics have no `top` array.
+
+Processes (`section` 2):
+
+```json
+{"schema": 1, "t": 1795000000000, "window_s": 5.02,
+ "processes": [{"pid": 1, "ppid": 0, "name": "", "user": "", "cpu": 0.0, "cpu_time_ms": 0, "mem": 0, "start": 1795000000}]}
+```
+
+Top processes (`section` 4):
+
+```json
+{"schema": 1, "t": 1795000000000, "window_s": 10.0, "process_count": 950,
+ "top": [{"pid": 1, "ppid": 0, "name": "", "user": "", "cpu": 0.0, "cpu_time_ms": 0, "mem": 0, "start": 1795000000}]}
+```
+
+- `t` is the time of the refresh, in milliseconds since the Unix epoch.
+- A refresh is one reading of the list of processes, for a query for section 2 or section 4. `window_s` is the time in seconds between the previous refresh and this one. The previous refresh can be for either section.
+- `cpu` is the average load of the process during the window, as a percentage of one core, so it can be above 100. It is not the load at one moment. The sender calculates it as the CPU time that the process used during the window, divided by `window_s`.
+- The first refresh after the service starts has no window. Then `window_s` is 0 and each `cpu` is 0. The sender does not wait and read again to get a value.
+- A process that started during the window used all its CPU time in the window. A process ID with a different `start` than in the previous refresh is a new process. If a process was not in the previous refresh but its `start` is before the window, its `cpu` is 0 in this document.
+- A window shorter than 1 millisecond gives `cpu` 0 for each process.
+- `cpu_time_ms` is the CPU time, user and system, that the process used since it started, in milliseconds. It is 0 when the target does not tell it without more rights, and then `cpu` is also 0. A reader can calculate a lifetime average from `cpu_time_ms` and `start`, and a trend from two documents.
+- `mem` is the resident memory. `start` is in seconds since the Unix epoch.
+- `processes` is in the order of `pid`.
+- `top` has at most 10 processes, the ones with the highest `cpu` first. Processes with the same `cpu`, and all processes when `window_s` is 0, are in the order of the highest `cpu_time_ms`, then the highest `mem`.
+- `process_count` in the top document is the number of all processes, not only of the listed ones.
+
+The sender never sends the command line or the environment of a process, only its name.
+
+USB devices (`section` 3):
+
+```json
+{"schema": 1, "devices": [{"bus": "", "address": 0, "vid": 7531, "pid": 2, "manufacturer": "",
+  "product": "", "class": 9, "speed": "high"}]}
+```
+
+`vid`, `pid` and `class` are numbers. `speed` is one of `low`, `full`, `high`, `super` and `super+`, or empty. The sender lists the devices and opens none.
 
 ## Message flows
 

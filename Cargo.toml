@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "xtask"]
+members = [".", "xtask", "hostinfo"]
 default-members = ["."]
 
 # The function size limits in clippy.toml keep every function short and
@@ -10,7 +10,7 @@ too_many_lines = "warn"
 
 [package]
 name = "ipkvm-os-services"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2021"
 license = "MIT"
 build = "build.rs"
@@ -23,6 +23,8 @@ cc = "1.4"
 
 [dependencies]
 nusb = "0.2"
+# The documents of the host info service: what the computer is and does.
+ipkvm-hostinfo = { path = "hostinfo" }
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
