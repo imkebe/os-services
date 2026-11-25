@@ -249,13 +249,19 @@ fn newer_helper_installed(version: &Path) -> bool {
         .is_some_and(|version: u32| version > HELPER_VERSION)
 }
 
-/// Points the capture stack at the library and helper this build carries.
+/// Points the capture stack at the libraries and helper this build carries.
 /// Called once at startup, before any thread reads the environment.
 pub fn announce_bundled_paths() {
     if std::env::var_os("OS_SERVICES_DRMTAP_LIB").is_none() {
         if let Some(library) = bundled("libdrmtap.so.0") {
             // SAFETY: no other thread exists yet.
             unsafe { std::env::set_var("OS_SERVICES_DRMTAP_LIB", library) };
+        }
+    }
+    if std::env::var_os("OS_SERVICES_KMS_LIB").is_none() {
+        if let Some(library) = bundled(crate::video::kms::KMS_LIBRARY) {
+            // SAFETY: as above.
+            unsafe { std::env::set_var("OS_SERVICES_KMS_LIB", library) };
         }
     }
     if std::env::var_os("OS_SERVICES_DRMTAP_HELPER").is_none() {

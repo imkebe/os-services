@@ -44,7 +44,7 @@ sudo usermod -aG ipkvm-capture <user>
 If the AppImage does not start or shows an error, check that the computer has what it needs:
 
 - glibc 2.35 or newer, for example Debian 12, Ubuntu 22.04 or Fedora 36 and newer. On an older system, the AppImage does not start.
-- The VAAPI, EGL and GLES libraries of the computer. These libraries must match the graphics drivers, so the AppImage does not include them. A desktop installation has them. On a minimal installation, install them first. For example, on Ubuntu:
+- For video, the VAAPI, EGL and GLES libraries of the computer. These libraries must match the graphics drivers, so the AppImage does not include them. A desktop installation has them. Without them, the service starts and the clipboard, the terminal and file transfer work, but the KVM shows its HDMI capture. To install them on a minimal installation, for example on Ubuntu:
 
   ```sh
   sudo apt install libva2 libva-drm2 libegl1 libgles2

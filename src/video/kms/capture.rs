@@ -8,83 +8,141 @@ use crate::protocol::VideoCodec;
 use crate::video::display::{find_online, Display, DisplaySelector};
 use std::ffi::{c_void, CStr, CString};
 use std::fmt;
+use std::mem::transmute;
 use std::os::raw::c_char;
+use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
+use std::sync::OnceLock;
 
 type PacketCallback = extern "C" fn(*const u8, i32, i32, u64, *const c_void);
 
-extern "C" {
-    fn kms_vaapi_new_encoder(
-        device: *const c_char,
-        connector_id: u32,
-        encoder_name: *const c_char,
-        framerate: i32,
-        kbs: i32,
-        gop: i32,
-        failure: *mut i32,
-    ) -> *mut c_void;
-    fn kms_vaapi_dimensions(handle: *mut c_void, width: *mut i32, height: *mut i32) -> i32;
-    fn kms_vaapi_set_rate(handle: *mut c_void, framerate: i32, kbs: i32) -> i32;
-    fn kms_vaapi_next(
-        handle: *mut c_void,
-        callback: PacketCallback,
-        obj: *const c_void,
-        force_idr: i32,
-    ) -> i32;
-    fn kms_vaapi_encoder_name(handle: *mut c_void) -> *const c_char;
-    fn kms_vaapi_destroy(handle: *mut c_void);
-
-    fn kms_nvenc_new_encoder(
-        device: *const c_char,
-        connector_id: u32,
-        encoder_name: *const c_char,
-        framerate: i32,
-        kbs: i32,
-        gop: i32,
-        failure: *mut i32,
-    ) -> *mut c_void;
-    fn kms_nvenc_dimensions(handle: *mut c_void, width: *mut i32, height: *mut i32) -> i32;
-    fn kms_nvenc_set_rate(handle: *mut c_void, framerate: i32, kbs: i32) -> i32;
-    fn kms_nvenc_next(
-        handle: *mut c_void,
-        callback: PacketCallback,
-        obj: *const c_void,
-        force_idr: i32,
-    ) -> i32;
-    fn kms_nvenc_encoder_name(handle: *mut c_void) -> *const c_char;
-    fn kms_nvenc_destroy(handle: *mut c_void);
-}
-
 type NewEncoder =
     unsafe extern "C" fn(*const c_char, u32, *const c_char, i32, i32, i32, *mut i32) -> *mut c_void;
+type Dimensions = unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32) -> i32;
+type SetRate = unsafe extern "C" fn(*mut c_void, i32, i32) -> i32;
+type Next = unsafe extern "C" fn(*mut c_void, PacketCallback, *const c_void, i32) -> i32;
+type EncoderName = unsafe extern "C" fn(*mut c_void) -> *const c_char;
+type Destroy = unsafe extern "C" fn(*mut c_void);
 
 /// The C functions of one backend; both backends have the same signatures.
 struct Functions {
     new_encoder: NewEncoder,
-    dimensions: unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32) -> i32,
-    set_rate: unsafe extern "C" fn(*mut c_void, i32, i32) -> i32,
-    next: unsafe extern "C" fn(*mut c_void, PacketCallback, *const c_void, i32) -> i32,
-    encoder_name: unsafe extern "C" fn(*mut c_void) -> *const c_char,
-    destroy: unsafe extern "C" fn(*mut c_void),
+    dimensions: Dimensions,
+    set_rate: SetRate,
+    next: Next,
+    encoder_name: EncoderName,
+    destroy: Destroy,
 }
 
-const VAAPI: Functions = Functions {
-    new_encoder: kms_vaapi_new_encoder,
-    dimensions: kms_vaapi_dimensions,
-    set_rate: kms_vaapi_set_rate,
-    next: kms_vaapi_next,
-    encoder_name: kms_vaapi_encoder_name,
-    destroy: kms_vaapi_destroy,
-};
+/// Both backends, from libipkvm-kms.so.
+struct Backends {
+    vaapi: Functions,
+    nvenc: Functions,
+}
 
-const NVENC: Functions = Functions {
-    new_encoder: kms_nvenc_new_encoder,
-    dimensions: kms_nvenc_dimensions,
-    set_rate: kms_nvenc_set_rate,
-    next: kms_nvenc_next,
-    encoder_name: kms_nvenc_encoder_name,
-    destroy: kms_nvenc_destroy,
-};
+/// The file name of the encoder library. It links VAAPI, EGL, GLES and
+/// libdrm, which come from the computer, so it is loaded only for video:
+/// without those libraries the service starts, and video is unavailable.
+pub const KMS_LIBRARY: &str = "libipkvm-kms.so";
+
+/// The loaded encoder library, or None when it would not load. The first
+/// call loads it and logs why it failed.
+fn backends() -> Option<&'static Backends> {
+    static LOADED: OnceLock<Option<Backends>> = OnceLock::new();
+    LOADED
+        .get_or_init(|| match load_backends() {
+            Ok(backends) => Some(backends),
+            Err(why) => {
+                eprintln!("ipkvm-os-services: video not available: {why}");
+                None
+            }
+        })
+        .as_ref()
+}
+
+/// Where to look for the library: only the path the supervisor names for a
+/// packaged build, else beside the program (a development build and its
+/// tests), then the loader's search path.
+fn library_candidates() -> Vec<CString> {
+    if let Some(path) = std::env::var_os("OS_SERVICES_KMS_LIB") {
+        return CString::new(path.into_vec()).into_iter().collect();
+    }
+    let mut paths = Vec::new();
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        paths.push(dir.join(KMS_LIBRARY));
+        paths.push(dir.join("..").join(KMS_LIBRARY));
+    }
+    let mut candidates: Vec<CString> = paths
+        .into_iter()
+        .filter(|path| path.exists())
+        .filter_map(|path| CString::new(path.into_os_string().into_vec()).ok())
+        .collect();
+    candidates.push(CString::new(KMS_LIBRARY).expect("no NUL"));
+    candidates
+}
+
+fn load_backends() -> Result<Backends, String> {
+    let mut why = String::new();
+    for candidate in library_candidates() {
+        // SAFETY: the library has no constructors with side effects beyond
+        // FFmpeg's and the GPU libraries' own.
+        let handle = unsafe { libc::dlopen(candidate.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+        if handle.is_null() {
+            why = dlerror();
+            // A library that exists but needs what the computer lacks is
+            // the answer; another candidate would fail the same way.
+            if candidate.as_bytes().contains(&b'/') {
+                break;
+            }
+            continue;
+        }
+        let resolve = |name: &str| -> Result<*mut c_void, String> {
+            let symbol = CString::new(name).expect("no NUL");
+            // SAFETY: handle is a loaded library.
+            let address = unsafe { libc::dlsym(handle, symbol.as_ptr()) };
+            if address.is_null() {
+                Err(format!("{KMS_LIBRARY} lacks {name}"))
+            } else {
+                Ok(address)
+            }
+        };
+        // SAFETY: each symbol is the C function of this name in
+        // kms_vaapi.cpp or kms_nvenc.cpp, with the signature in Functions.
+        let functions = |prefix: &str| -> Result<Functions, String> {
+            let symbol = |name: &str| resolve(&format!("{prefix}_{name}"));
+            unsafe {
+                Ok(Functions {
+                    new_encoder: transmute::<*mut c_void, NewEncoder>(symbol("new_encoder")?),
+                    dimensions: transmute::<*mut c_void, Dimensions>(symbol("dimensions")?),
+                    set_rate: transmute::<*mut c_void, SetRate>(symbol("set_rate")?),
+                    next: transmute::<*mut c_void, Next>(symbol("next")?),
+                    encoder_name: transmute::<*mut c_void, EncoderName>(symbol("encoder_name")?),
+                    destroy: transmute::<*mut c_void, Destroy>(symbol("destroy")?),
+                })
+            }
+        };
+        // The library stays loaded for the life of the process.
+        return Ok(Backends {
+            vaapi: functions("kms_vaapi")?,
+            nvenc: functions("kms_nvenc")?,
+        });
+    }
+    Err(format!("{} ({why})", KmsFailure::GraphicsLibrariesMissing))
+}
+
+fn dlerror() -> String {
+    // SAFETY: dlerror returns a thread-local message or null.
+    let message = unsafe { libc::dlerror() };
+    if message.is_null() {
+        return "unknown error".into();
+    }
+    unsafe { CStr::from_ptr(message) }
+        .to_string_lossy()
+        .into_owned()
+}
 
 /// The encoder family that takes a card's scanout. NVIDIA's proprietary
 /// driver has no VAAPI encoder, so its cards encode with NVENC.
@@ -114,11 +172,14 @@ impl Backend {
         }
     }
 
-    fn functions(self) -> &'static Functions {
-        match self {
-            Self::Vaapi => &VAAPI,
-            Self::Nvenc => &NVENC,
-        }
+    /// The backend's functions, or None when the encoder library would not
+    /// load.
+    fn functions(self) -> Option<&'static Functions> {
+        let backends = backends()?;
+        Some(match self {
+            Self::Vaapi => &backends.vaapi,
+            Self::Nvenc => &backends.nvenc,
+        })
     }
 }
 
@@ -154,6 +215,10 @@ pub enum KmsFailure {
     /// render group fixes it; without it, only the active desktop session's
     /// user has access.
     RenderNodeDenied = 8,
+    /// The encoder library would not load: the computer lacks VAAPI, EGL or
+    /// GLES (or libdrm), which the AppImage leaves to the computer. Only the
+    /// Rust side reports it.
+    GraphicsLibrariesMissing = 9,
 }
 
 impl KmsFailure {
@@ -166,6 +231,7 @@ impl KmsFailure {
             5 => Self::FormatUnsupported,
             6 => Self::EncoderUnavailable,
             8 => Self::RenderNodeDenied,
+            9 => Self::GraphicsLibrariesMissing,
             _ => Self::PipelineFailed,
         }
     }
@@ -175,7 +241,10 @@ impl KmsFailure {
     /// scanout that can come back, then the most specific pipeline error.
     fn rank(self) -> u8 {
         match self {
-            Self::LibraryUnavailable | Self::HelperUnavailable | Self::RenderNodeDenied => 5,
+            Self::LibraryUnavailable
+            | Self::HelperUnavailable
+            | Self::RenderNodeDenied
+            | Self::GraphicsLibrariesMissing => 5,
             Self::NoScanout => 4,
             Self::EncoderUnavailable => 3,
             Self::FormatUnsupported => 2,
@@ -203,6 +272,10 @@ impl fmt::Display for KmsFailure {
             Self::PipelineFailed => "the capture pipeline failed to build; the log has why",
             Self::RenderNodeDenied => {
                 "this account may not open the GPU's render node; add it to the render group"
+            }
+            Self::GraphicsLibrariesMissing => {
+                "the computer lacks the VAAPI, EGL or GLES libraries; install libva2, \
+                 libva-drm2, libegl1 and libgles2 (Debian and Ubuntu names)"
             }
         })
     }
@@ -272,7 +345,9 @@ impl KmsEncoder {
         kbps: i32,
         gop: i32,
     ) -> Result<Self, KmsFailure> {
-        let functions = backend.functions();
+        let functions = backend
+            .functions()
+            .ok_or(KmsFailure::GraphicsLibrariesMissing)?;
         let c_device = CString::new(device).expect("device path has no NUL");
         let c_encoder = CString::new(backend.encoder(codec)).expect("encoder name has no NUL");
         let mut failure = 0i32;

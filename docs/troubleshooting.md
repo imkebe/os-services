@@ -180,6 +180,15 @@ When the service sends no video, the KVM shows its HDMI capture. The clipboard, 
 </details>
 
 <details>
+<summary><code>video not available: the computer lacks the VAAPI, EGL or GLES libraries</code></summary>
+
+**Cause:** The computer does not have the VAAPI, EGL or GLES libraries. The AppImage does not include them, because they must match the graphics driver. The service runs without them, but it cannot send video, so the KVM shows its HDMI capture. The log line ends with the name of the missing library.
+
+**Fix:** Install the libraries, for example on Debian and Ubuntu: `sudo apt install libva2 libva-drm2 libegl1 libgles2`. Then restart the service, or sign out and sign in again. Video also needs a VAAPI driver for the GPU; many ARM boards have none.
+
+</details>
+
+<details>
 <summary><code>video not available: libdrmtap is not installed, or is not the version this service was built against</code></summary>
 
 **Cause:** The build does not contain the correct version of the library.
