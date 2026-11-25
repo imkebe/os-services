@@ -41,7 +41,8 @@ pub fn write(output: &Path, native: Native) -> Result {
     let own = read(&root().join("LICENSE"))?;
     let crates = crates::entries()?;
     const VCPKG_TITLE: &str = "Native libraries";
-    const VCPKG_INTRO: &str = "Built with vcpkg from `vendor/vcpkg` and linked into the program.";
+    const VCPKG_INTRO: &str =
+        "Built with vcpkg from `vendor/vcpkg` and linked into the program (on Linux, into its libipkvm-kms.so).";
     let mut sections = vec![("Rust crates", "Linked into the program.", crates)];
     match native {
         Native::Vcpkg { installed, triplet } => {

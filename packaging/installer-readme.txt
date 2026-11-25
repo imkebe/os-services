@@ -1,6 +1,8 @@
 IP-KVM OS Services @VERSION@
 
-This disc has an installer for Windows, macOS and Linux.
+This disc has an installer for Windows, macOS and Linux. The file name
+says the computer it is for: x86_64 for Intel and AMD, aarch64 for Apple
+silicon and 64-bit ARM, armhf for 32-bit ARM.
 
 INSTALL
 

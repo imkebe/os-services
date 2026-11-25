@@ -46,6 +46,20 @@ These options change the commands:
 
 - `--skip-go` removes the Go tools from `test`, `lint` and `ci`.
 - `--hardware` adds the tests that need a hardware encoder to `test` and `ci`.
+- `--target TRIPLE` builds `setup`, `build`, `test` and `package` for another architecture of the same operating system. The installers go into `dist/` as usual; the build is in `target/TRIPLE/release`.
+
+## Other architectures
+
+Self-update works only in the Windows x64, macOS arm64 and Linux x64 builds. The other builds run and connect, but they do not update themselves.
+
+| Build | Where | Command |
+|---|---|---|
+| macOS x86_64 | an Apple silicon Mac, after `rustup target add x86_64-apple-darwin` | `cargo xtask setup --target x86_64-apple-darwin`, then `cargo xtask package --target x86_64-apple-darwin`. Without Rosetta, the package step does not start the program. |
+| Linux arm64 | Docker on an arm64 computer or Apple silicon | `docker build --platform linux/arm64 --target dist --output type=local,dest=dist .` |
+| Linux amd64 | Docker | `docker build --platform linux/amd64 --target dist --output type=local,dest=dist .` |
+| Linux armhf (32-bit ARMv7) | Docker on an arm64 computer or Apple silicon | `docker build -f Dockerfile.armhf --target dist --output type=local,dest=dist .` It cross-compiles, and runs the tests and the AppImage tools through binfmt emulation. |
+
+Docker's classic image store keeps one platform per tag. Before you build for another platform, pull the base image for that platform: `docker pull --platform linux/arm64 ubuntu:22.04`.
 
 ## Run a build
 

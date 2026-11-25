@@ -1,6 +1,6 @@
 # FFmpeg with only the hardware encoders that the service opens, as static
-# release libraries for the x64-windows-static, x64-linux and arm64-osx
-# triplets. The build steps follow vcpkg's own FFmpeg port; the component
+# release libraries for the x64-windows-static, x64-linux, arm64-linux,
+# arm-linux, arm64-osx and x64-osx triplets. The build steps follow vcpkg's own FFmpeg port; the component
 # list is this repository's. ../../UPSTREAM.md describes the patches.
 set(VCPKG_BUILD_TYPE release)
 # The triplets expect debug libraries too; the service links only release ones.
@@ -107,26 +107,39 @@ elseif(VCPKG_TARGET_IS_LINUX)
         --enable-vaapi
         --enable-encoder=h264_vaapi
         --enable-encoder=hevc_vaapi
-        --enable-cuda
-        --enable-ffnvcodec
-        --enable-encoder=h264_nvenc
-        --enable-encoder=hevc_nvenc
         --enable-avfilter
         --enable-filter=buffer
         --enable-filter=buffersink
         --enable-filter=hwmap
     )
+    # FFmpeg builds NVENC only for x86 and 64-bit ARM; NVIDIA has no 32-bit
+    # ARM driver. The ffnvcodec headers are installed on every architecture,
+    # because the KMS capture compiles against them.
+    if(NOT VCPKG_TARGET_ARCHITECTURE STREQUAL "arm")
+        list(APPEND ffmpeg_options
+            --enable-cuda
+            --enable-ffnvcodec
+            --enable-encoder=h264_nvenc
+            --enable-encoder=hevc_nvenc
+        )
+    endif()
 elseif(VCPKG_TARGET_IS_OSX)
-    # VideoToolbox only, for Apple Silicon.
+    # VideoToolbox only. The flags below drop the triplet's -arch, so it is
+    # added back for the triplet's architecture.
+    if(VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
+        set(osx_arch x86_64)
+    else()
+        set(osx_arch arm64)
+    endif()
     list(APPEND ffmpeg_options
         --disable-autodetect
         --enable-videotoolbox
         --enable-encoder=h264_videotoolbox
         --enable-encoder=hevc_videotoolbox
         --extra-cflags=-arch
-        --extra-cflags=arm64
+        --extra-cflags=${osx_arch}
         --extra-ldflags=-arch
-        --extra-ldflags=arm64
+        --extra-ldflags=${osx_arch}
     )
 else()
     message(FATAL_ERROR "This port builds FFmpeg for Windows, Linux and macOS only")
@@ -136,8 +149,11 @@ if(VCPKG_TARGET_ARCHITECTURE STREQUAL "x64")
     list(APPEND ffmpeg_options --arch=x86_64 --enable-asm --enable-x86asm)
 elseif(VCPKG_TARGET_ARCHITECTURE STREQUAL "arm64")
     list(APPEND ffmpeg_options --arch=arm64 --enable-asm --disable-x86asm)
+elseif(VCPKG_TARGET_ARCHITECTURE STREQUAL "arm" AND VCPKG_TARGET_IS_LINUX)
+    # 32-bit ARM Linux (armhf), cross-compiled in Dockerfile.armhf.
+    list(APPEND ffmpeg_options --arch=arm --enable-asm --disable-x86asm)
 else()
-    message(FATAL_ERROR "This port builds FFmpeg for x64 and arm64 only")
+    message(FATAL_ERROR "This port builds FFmpeg for x64, arm64 and Linux arm only")
 endif()
 
 list(JOIN ffmpeg_options " " OPTIONS)

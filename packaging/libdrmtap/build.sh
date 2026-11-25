@@ -34,7 +34,9 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 echo "building libdrmtap v$VERSION"
-git clone -q "$REPO" "$WORK/src"
+# LIBDRMTAP_REPO clones from another copy of the repository, such as a
+# local one; the notices still name $REPO.
+git clone -q "${LIBDRMTAP_REPO:-$REPO}" "$WORK/src"
 git -C "$WORK/src" checkout -q "$COMMIT"
 # The patches in this folder change libdrmtap and have its license (MIT).
 for patch in "$HERE"/*.patch; do
@@ -54,7 +56,9 @@ fi
 
 # libdrmtap's EGL is only for detiling into CPU pixels, which the sender
 # never asks for: it imports the scanout dma-buf itself.
-meson setup "$WORK/build" "$WORK/src" -Degl=disabled --buildtype=release >/dev/null
+# MESON_CROSS_FILE builds it for another architecture (Dockerfile.armhf).
+meson setup "$WORK/build" "$WORK/src" -Degl=disabled --buildtype=release \
+  ${MESON_CROSS_FILE:+--cross-file "$MESON_CROSS_FILE"} >/dev/null
 meson compile -C "$WORK/build" >/dev/null
 
 if [ -n "$STAGE" ]; then

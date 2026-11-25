@@ -1,5 +1,5 @@
 {
-  "$comment": "The FFmpeg that the service links: hardware H.264 and H.265 encoders only. On Linux, FFmpeg adds the KMS capture's filters and links the computer's libva. The ports directory holds the FFmpeg port that UPSTREAM.md describes.",
+  "$comment": "The FFmpeg that the service links: hardware H.264 and H.265 encoders only. On Linux, FFmpeg adds the KMS capture's filters and links the computer's libva; the NVENC headers are on every Linux architecture because the KMS capture compiles against them (NVIDIA ships arm64 drivers). The ports directory holds the FFmpeg port that UPSTREAM.md describes.",
   "name": "ipkvm-os-services",
   "dependencies": [
     {
@@ -15,7 +15,7 @@
         },
         {
           "name": "nvcodec",
-          "platform": "(windows & !arm & static) | (linux & x64)"
+          "platform": "(windows & !arm & static) | linux"
         },
         {
           "name": "qsv",

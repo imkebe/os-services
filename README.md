@@ -9,6 +9,7 @@ IP-KVM OS Services is a small service for the computer that a KVM is connected t
 - A shared clipboard
 - A terminal
 - File transfer to the computer
+- Information about the computer: processor, memory, disks, graphics and processes
 
 The service and the [IP-KVM OS Services protocol](PROTOCOL.md) are vendor-neutral, so any KVM can implement the protocol.
 
@@ -17,18 +18,24 @@ The service and the [IP-KVM OS Services protocol](PROTOCOL.md) are vendor-neutra
 | KVM | Firmware | OS Services |
 |---|---|---|
 | JetKVM Mini | [jetkvm/mini](https://github.com/jetkvm/mini) | Supported |
-| JetKVM | [jetkvm/kvm](https://github.com/jetkvm/kvm) | Not supported |
+| JetKVM with the advanced-1 firmware | [imkebe/kvm](https://github.com/imkebe/kvm) | Supported, with host info |
+| JetKVM with the official firmware | [jetkvm/kvm](https://github.com/jetkvm/kvm) | Not supported |
 
 ## Requirements
 
 - A [supported KVM](#supported-kvms).
 - One of these computers:
 
-  | OS | Architecture | Video encoder |
-  |---|---|---|
-  | Windows 11 | x64 | Intel Quick Sync, NVIDIA NVENC or AMD AMF |
-  | macOS 12.3 or later | Apple silicon | VideoToolbox |
-  | Linux with KMS | x64 | VAAPI (Intel or AMD graphics), or NVENC (NVIDIA proprietary driver, Wayland only). If the VAAPI driver has no H.264 encoder, the CPU encodes with OpenH264. |
+  | OS | Architecture | Video encoder | Updates itself |
+  |---|---|---|---|
+  | Windows 11 | x64 | Intel Quick Sync, NVIDIA NVENC or AMD AMF | Yes |
+  | macOS 12.3 or later | Apple silicon | VideoToolbox | Yes |
+  | macOS 12.3 or later | Intel | VideoToolbox | No |
+  | Linux with KMS | x64 | VAAPI (Intel or AMD graphics), or NVENC (NVIDIA proprietary driver, Wayland only). If the VAAPI driver has no H.264 encoder, the CPU encodes with OpenH264. | Yes |
+  | Linux with KMS | arm64 | As on x64. Not tested on hardware. | No |
+  | Linux with KMS | armhf (ARMv7) | As on x64. Not tested on hardware. | No |
+
+  Windows on ARM is not supported. macOS on Intel and Linux on arm64 and armhf are added by this branch.
 
 ## Install
 
