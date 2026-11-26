@@ -27,7 +27,7 @@ This document tells you how to build and test the service.
 
 2. Run `cargo xtask setup` one time.
 
-`cargo xtask setup` builds FFmpeg with vcpkg. On Linux, it also builds libdrmtap.
+`cargo xtask setup` builds FFmpeg with vcpkg. On Linux, it also builds libdrmtap. On Linux, the build links the video encoders and FFmpeg into `libipkvm-kms.so`, beside the program in the cargo profile folder. The service loads it when it first opens a video pipeline, so it starts on a computer without VAAPI, EGL or GLES. To use another copy, set `OS_SERVICES_KMS_LIB` to its path.
 
 ## Build commands
 

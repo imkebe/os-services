@@ -43,6 +43,7 @@ enum KmsOpenFailure : int32_t {
   KMS_PIPELINE_FAILED = 7,
   // This account may not open the GPU's render node.
   KMS_RENDER_NODE_DENIED = 8,
+  // 9 is the Rust side's own: libipkvm-kms.so, this code, would not load.
 };
 
 // What one pull of a pipeline did, as the encoders' next functions report

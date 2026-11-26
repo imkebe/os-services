@@ -6,7 +6,7 @@
 mod capture;
 pub mod capture_test;
 
-pub use capture::{h265_enabled, probe, Backend, CaptureTarget, KmsFailure, Probed};
+pub use capture::{h265_enabled, probe, Backend, CaptureTarget, KmsFailure, Probed, KMS_LIBRARY};
 
 use super::{
     annex_b::unit_has_parameter_sets,

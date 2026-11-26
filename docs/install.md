@@ -4,13 +4,18 @@ The service runs in the desktop session of the user who is signed in on the comp
 
 ## Get the installer
 
-Each [release](https://github.com/jetkvm/os-services/releases/latest) has the installer for each operating system:
+Each [release](https://github.com/imkebe/os-services/releases/latest) has the installer for each operating system:
 
 | OS | Installer |
 |---|---|
-| Windows | The `windows-x86_64-setup.exe` file |
-| macOS | The `macos-aarch64.dmg` file |
-| Linux | The `linux-x86_64.tar.gz` file, which contains the AppImage |
+| Windows, x64 | The `windows-x86_64-setup.exe` file |
+| macOS, Apple silicon | The `macos-aarch64.dmg` file |
+| macOS, Intel | The `macos-x86_64.dmg` file |
+| Linux, x64 | The `linux-x86_64.tar.gz` file, which contains the AppImage |
+| Linux, arm64 | The `linux-aarch64.tar.gz` file, which contains the AppImage |
+| Linux, armhf (ARMv7) | The `linux-armhf.tar.gz` file, which contains the AppImage |
+
+The `jetkvm-os-services.iso` file is a disc with all of them, for a computer without a network: the KVM can mount it as a CD-ROM.
 
 After you install the service, allow the KVM. See [Allow the KVM](#allow-the-kvm).
 
@@ -44,7 +49,7 @@ sudo usermod -aG ipkvm-capture <user>
 If the AppImage does not start or shows an error, check that the computer has what it needs:
 
 - glibc 2.35 or newer, for example Debian 12, Ubuntu 22.04 or Fedora 36 and newer. On an older system, the AppImage does not start.
-- The VAAPI, EGL and GLES libraries of the computer. These libraries must match the graphics drivers, so the AppImage does not include them. A desktop installation has them. On a minimal installation, install them first. For example, on Ubuntu:
+- For video, the VAAPI, EGL and GLES libraries of the computer. These libraries must match the graphics drivers, so the AppImage does not include them. A desktop installation has them. Without them, the service starts and the clipboard, the terminal and file transfer work, but the KVM shows its HDMI capture. To install them on a minimal installation, for example on Ubuntu:
 
   ```sh
   sudo apt install libva2 libva-drm2 libegl1 libgles2
@@ -117,7 +122,7 @@ On Linux, a release also checks who made the package. It installs the package on
 
 On Windows, a service that has an Authenticode signature runs only an installer that the publisher of the service signed. It deletes any other installer and tells the KVM why. The Windows release has no Authenticode signature, so it does not do this check.
 
-If the service cannot replace itself, for example because you do not have write access to its folder, update it manually with the installer from a [release](https://github.com/jetkvm/os-services/releases/latest):
+If the service cannot replace itself, for example because you do not have write access to its folder, update it manually with the installer from a [release](https://github.com/imkebe/os-services/releases/latest):
 
 - **Windows:** Install the new release over the old one. The installer starts the service again.
 - **macOS:** Replace the app in **Applications**. Then open the app to start the service again.
