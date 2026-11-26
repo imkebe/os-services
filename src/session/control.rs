@@ -5,7 +5,7 @@
 use super::{worker::Worker, CONTROL_POLL};
 use crate::approval::Approval;
 use crate::protocol::{ControlRecord, NotApproved, ServiceReply, SessionSettings, UsbRx};
-use crate::services::{clipboard, file_transfer, terminal, update};
+use crate::services::{clipboard, file_transfer, hostinfo, terminal, update};
 use crate::supervisor::update::Staged;
 use crate::video::display;
 use std::{
@@ -173,6 +173,8 @@ pub struct ControlLink<'a> {
     staged: update::StagedUpdate,
     /// The user's approval of this KVM; the session ends when it is gone.
     approval: Approval,
+    /// The host info service, which collects and answers on its own thread.
+    hostinfo: hostinfo::HostInfo,
 }
 
 impl<'a> ControlLink<'a> {
@@ -182,6 +184,7 @@ impl<'a> ControlLink<'a> {
         shutdown: &'a AtomicBool,
         staged: update::StagedUpdate,
         approval: Approval,
+        hostinfo: hostinfo::HostInfo,
     ) -> Self {
         let wake = reader.shell_wake();
         Self {
@@ -196,6 +199,7 @@ impl<'a> ControlLink<'a> {
             shutdown,
             staged,
             approval,
+            hostinfo,
         }
     }
 
@@ -229,11 +233,12 @@ impl<'a> ControlLink<'a> {
         Ok(())
     }
 
-    /// Ends everything the KVM reaches through the link: the shells, and
-    /// the file and update services of the reader. The reader runs on, and
+    /// Ends everything the KVM reaches through the link: the shells, the
+    /// host info, and the file and update services of the reader. The reader runs on, and
     /// the USB link stays open, so the writer can send session.close.
     pub fn end_services(&mut self) {
         self.terminals.set_shell(false, &mut Vec::new());
+        self.hostinfo.stop();
         self.reader.refused.store(true, Ordering::Relaxed);
     }
 
@@ -309,6 +314,13 @@ impl<'a> ControlLink<'a> {
                 self.apply_session_config(settings, worker, replies)
             }
             ControlRecord::ClipboardConfig { enabled } => self.clipboard_enabled = enabled,
+            ControlRecord::HostInfoSubscribe { interval_ms } => {
+                self.hostinfo.subscribe(interval_ms)
+            }
+            ControlRecord::HostInfoQuery {
+                request_id,
+                section,
+            } => self.hostinfo.query(request_id, section),
             record if record.is_terminal() => self.terminals.handle(record, replies),
             record => match clipboard::answer(&record, self.clipboard_enabled) {
                 Some(reply) => worker.reply(ServiceReply::Clipboard(reply)),
@@ -317,9 +329,9 @@ impl<'a> ControlLink<'a> {
         }
     }
 
-    /// The session policy, applied each time the KVM sends it: the shells
-    /// and the file service follow it at once, video follows the picked
-    /// display.
+    /// The session policy, applied each time the KVM sends it: the shells,
+    /// the file service and the host info follow it at once, video follows
+    /// the picked display.
     fn apply_session_config(
         &mut self,
         settings: SessionSettings,
@@ -332,6 +344,7 @@ impl<'a> ControlLink<'a> {
             let capabilities = file_transfer::capabilities(settings.files_enabled);
             worker.register(crate::protocol::Registration::File(capabilities));
         }
+        self.hostinfo.set_enabled(settings.hostinfo_enabled);
         self.capture_display = capture_display(&settings);
     }
 
@@ -419,6 +432,11 @@ mod tests {
         (store, kvm)
     }
 
+    /// The host info service as a session without the policy has it: off.
+    fn host_info_off() -> hostinfo::HostInfo {
+        hostinfo::HostInfo::spawn(false, |_| {})
+    }
+
     fn approval(name: &str) -> Approval {
         let (store, kvm) = approved_kvm(name);
         Approval::of(store, kvm)
@@ -463,6 +481,7 @@ mod tests {
             &shutdown,
             Default::default(),
             approval("round-trips"),
+            host_info_off(),
         );
         let receive = || wire.recv_timeout(Duration::from_secs(5)).expect("a write");
         thread::scope(|scope| {
@@ -556,6 +575,7 @@ mod tests {
             &shutdown,
             Default::default(),
             approval("output"),
+            host_info_off(),
         );
         let print = link.terminals.printing(7);
         let print_and_wait = |data: &[u8]| {
@@ -618,8 +638,14 @@ mod tests {
                 thread: None,
             };
             let approval = Approval::of(store.clone(), approved);
-            let mut link =
-                ControlLink::new(reader, &settings, &shutdown, Default::default(), approval);
+            let mut link = ControlLink::new(
+                reader,
+                &settings,
+                &shutdown,
+                Default::default(),
+                approval,
+                host_info_off(),
+            );
             let deadline = Instant::now() + Duration::from_millis(1500);
             let ended = link
                 .serve_until(&worker, |_| {
@@ -737,7 +763,14 @@ mod tests {
         let settings = SessionSettings::default();
         // The first read of the list comes after the pass has started.
         let approval = Approval::read_every(READ_INTERVAL, store, fingerprint);
-        let mut link = ControlLink::new(reader, &settings, &shutdown, Default::default(), approval);
+        let mut link = ControlLink::new(
+            reader,
+            &settings,
+            &shutdown,
+            Default::default(),
+            approval,
+            host_info_off(),
+        );
         let served = link.serve(&worker);
         assert!(served.is_err_and(|err| err.is::<NotApproved>()));
     }

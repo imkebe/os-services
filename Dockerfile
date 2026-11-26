@@ -88,6 +88,10 @@ COPY src/video/kms/native ./src/video/kms/native
 COPY vendor/nusb ./vendor/nusb
 COPY xtask/Cargo.toml ./xtask/
 COPY xtask/src/vcpkg_layout.rs ./xtask/src/
+# The other workspace members: the host info crate is a dependency of the
+# service, and cargo reads every member's manifest.
+COPY hostinfo ./hostinfo
+COPY LICENSE ./
 RUN mkdir -p src xtask/src \
     && echo 'fn main() {}' > src/main.rs \
     && echo 'fn main() {}' > xtask/src/main.rs

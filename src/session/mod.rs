@@ -12,7 +12,7 @@ pub mod worker;
 
 use crate::approval::{Approval, PinStore};
 use crate::protocol::{self, ControlRecord, Registration, VideoConfig};
-use crate::services::{clipboard, file_transfer, update};
+use crate::services::{clipboard, file_transfer, hostinfo, update};
 use crate::supervisor::update::{Installation, Staged};
 use crate::video::{self, display, stream, CaptureFailure};
 use control::{ControlLink, ControlReader};
@@ -62,9 +62,22 @@ impl<'a> Session<'a> {
             replier.reply(protocol::ServiceReply::Update(reply))
         });
         let reader = ControlReader::spawn(negotiated.rx, files, updates);
-        let link = ControlLink::new(reader, &settings, shutdown, staged, approval);
+        let hostinfo = host_info(&worker, settings.hostinfo_enabled);
+        let link = ControlLink::new(reader, &settings, shutdown, staged, approval, hostinfo);
         Ok((Self { worker, link }, negotiated.device))
     }
+}
+
+/// The host info service, sending on the worker's wire. It registers
+/// itself when the session's policy allows it.
+fn host_info(worker: &Worker, enabled: bool) -> hostinfo::HostInfo {
+    let replier = worker.replier();
+    hostinfo::HostInfo::spawn(enabled, move |output| match output {
+        hostinfo::Output::Register(sections) => {
+            replier.register(Registration::HostInfo { sections });
+        }
+        hostinfo::Output::Reply(reply) => replier.reply(protocol::ServiceReply::HostInfo(reply)),
+    })
 }
 
 impl Drop for Session<'_> {
@@ -184,7 +197,8 @@ fn serve_video(
 
 /// Clipboard, terminal, file transfer and updates need no capture and
 /// register at once with the policy the session opened with; a later
-/// session.config re-registers what it changes. An installation that cannot
+/// session.config re-registers what it changes. The host info service
+/// registers itself, from its own thread. An installation that cannot
 /// replace itself offers no updates.
 fn register_services(worker: &Worker, link: &ControlLink, installation: Option<&Installation>) {
     worker.register(Registration::Clipboard(clipboard::capabilities()));

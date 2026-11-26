@@ -22,9 +22,11 @@ pub const SENDER_VERSION: &str = match option_env!("IPKVM_OS_SERVICES_VERSION") 
 };
 
 /// The protocol version this sender speaks. The sender accepts a
-/// session.ready only when it carries this version.
+/// session.ready that carries this major version and a minor version up to
+/// its own: the KVM answers with the lower of the two minor versions. Minor
+/// version 1 adds the host info service.
 const PROTOCOL_MAJOR: u16 = 5;
-const PROTOCOL_MINOR: u16 = 0;
+const PROTOCOL_MINOR: u16 = 1;
 
 const SESSION_SERVICE: u16 = 0;
 pub(crate) const VIDEO_SERVICE: u16 = 1;
@@ -32,6 +34,8 @@ const CLIPBOARD_SERVICE: u16 = 2;
 const TERMINAL_SERVICE: u16 = 3;
 const FILE_SERVICE: u16 = 4;
 const UPDATE_SERVICE: u16 = 5;
+// 6 is reserved: it was the camera service.
+const HOSTINFO_SERVICE: u16 = 7;
 
 const SESSION_HELLO: u16 = 1;
 const SESSION_READY: u16 = 2;
@@ -79,6 +83,13 @@ const UPDATE_CREDIT: u16 = 5;
 const UPDATE_STATUS: u16 = 6;
 const UPDATE_CANCEL: u16 = 7;
 
+const HOSTINFO_CAPABILITIES: u16 = 1;
+const HOSTINFO_SUBSCRIBE: u16 = 2;
+const HOSTINFO_INVENTORY: u16 = 3;
+const HOSTINFO_METRICS: u16 = 4;
+const HOSTINFO_QUERY: u16 = 5;
+const HOSTINFO_RESULT: u16 = 6;
+
 /// Every message starts with service, kind and payload length.
 const ENVELOPE_LEN: usize = 8;
 const MAX_CONTROL_PAYLOAD: usize = 64 << 10;
@@ -103,6 +114,13 @@ pub const FILE_MAX_CHUNK: usize = MAX_CONTROL_PAYLOAD - 12;
 const UPDATE_MAX_CHUNK: usize = FILE_MAX_CHUNK;
 /// The longest release version update.begin carries.
 const UPDATE_MAX_VERSION: usize = 64;
+
+/// The largest hostinfo.inventory or hostinfo.metrics document.
+pub const HOSTINFO_MAX_DOCUMENT: usize = MAX_CONTROL_PAYLOAD;
+/// The most JSON one hostinfo.result carries after its eight fixed bytes.
+pub const HOSTINFO_MAX_CHUNK: usize = 60 << 10;
+/// The largest answer to a hostinfo.query, over all its chunks.
+pub const HOSTINFO_MAX_RESULT: usize = 1 << 20;
 
 const MAX_DIMENSION: u32 = 16384;
 const MAX_FPS: u32 = 240;
@@ -419,6 +437,37 @@ pub enum UpdateReply {
     },
 }
 
+/// The sections of the host info service, as bits of hostinfo.capabilities.
+pub const HOSTINFO_INVENTORY_SECTION: u32 = 1;
+pub const HOSTINFO_METRICS_SECTION: u32 = 1 << 1;
+pub const HOSTINFO_PROCESSES_SECTION: u32 = 1 << 2;
+pub const HOSTINFO_USB_SECTION: u32 = 1 << 3;
+
+/// The section a hostinfo.query asks for, as its number on the wire.
+pub const HOSTINFO_QUERY_INVENTORY: u8 = 1;
+pub const HOSTINFO_QUERY_PROCESSES: u8 = 2;
+pub const HOSTINFO_QUERY_USB: u8 = 3;
+/// The top list. It belongs to the processes section of the capabilities.
+pub const HOSTINFO_QUERY_TOP: u8 = 4;
+
+/// What the host info service sends.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HostInfoReply {
+    /// The inventory document, as JSON.
+    Inventory(String),
+    /// A metrics document, as JSON.
+    Metrics(String),
+    /// One chunk of the answer to a hostinfo.query. With `error`, the body
+    /// is a message for the user and not JSON.
+    Result {
+        request_id: u32,
+        section: u8,
+        last: bool,
+        error: bool,
+        body: Vec<u8>,
+    },
+}
+
 /// One answer from the sender's services.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ServiceReply {
@@ -427,6 +476,7 @@ pub enum ServiceReply {
     Terminal(TerminalReply),
     File(FileReply),
     Update(UpdateReply),
+    HostInfo(HostInfoReply),
 }
 
 /// A service registering itself with the KVM, or withdrawing. A service
@@ -437,9 +487,15 @@ pub enum Registration {
     Video(VideoCapabilities),
     VideoWithdrawn,
     Clipboard(ClipboardCapabilities),
-    Terminal { shell: bool },
+    Terminal {
+        shell: bool,
+    },
     File(FileCapabilities),
     Update(UpdatePackage),
+    /// The sections the host info service offers; zero withdraws it.
+    HostInfo {
+        sections: u32,
+    },
 }
 
 /// The session policy from session.config.
@@ -454,6 +510,10 @@ pub struct SessionSettings {
     /// the display's mode and says so in video.capabilities.
     #[serde(default)]
     pub display_mode_by_sender: bool,
+    /// The user lets the KVM read the host info. A KVM that does not know
+    /// the service does not name it, which means no.
+    #[serde(default)]
+    pub hostinfo_enabled: bool,
 }
 
 /// A record the KVM sends to the sender.
@@ -496,6 +556,15 @@ pub enum ControlRecord {
     },
     File(FileRecord),
     Update(UpdateRecord),
+    /// Starts, renews or (with a zero interval) ends the metrics
+    /// subscription.
+    HostInfoSubscribe {
+        interval_ms: u32,
+    },
+    HostInfoQuery {
+        request_id: u32,
+        section: u8,
+    },
 }
 
 impl ControlRecord {

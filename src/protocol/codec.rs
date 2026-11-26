@@ -94,6 +94,11 @@ pub fn registration(registration: &Registration) -> io::Result<Message> {
             FILE_CAPABILITIES,
             u32::from(capabilities.receive).to_le_bytes().to_vec(),
         ),
+        Registration::HostInfo { sections } => Message::new(
+            HOSTINFO_SERVICE,
+            HOSTINFO_CAPABILITIES,
+            sections.to_le_bytes().to_vec(),
+        ),
         Registration::Update(package) => {
             // Bit 0 is install, the one capability of the service.
             let mut payload = 1_u32.to_le_bytes().to_vec();
@@ -190,7 +195,48 @@ pub fn service_reply(reply: &ServiceReply) -> io::Result<Message> {
         ServiceReply::Terminal(reply) => terminal_reply(reply),
         ServiceReply::File(reply) => Ok(file_reply(reply)),
         ServiceReply::Update(reply) => Ok(update_reply(reply)),
+        ServiceReply::HostInfo(reply) => hostinfo_reply(reply),
     }
+}
+
+/// A document is at most one control payload, and a result chunk at most
+/// 60 KiB after its eight fixed bytes: request id, section, flags (bit 0
+/// last chunk, bit 1 error) and two zero bytes.
+fn hostinfo_reply(reply: &HostInfoReply) -> io::Result<Message> {
+    let (kind, payload) = match reply {
+        HostInfoReply::Inventory(json) => (HOSTINFO_INVENTORY, hostinfo_document(json)?),
+        HostInfoReply::Metrics(json) => (HOSTINFO_METRICS, hostinfo_document(json)?),
+        HostInfoReply::Result {
+            request_id,
+            section,
+            last,
+            error,
+            body,
+        } => {
+            if body.len() > HOSTINFO_MAX_CHUNK {
+                return Err(invalid(format!(
+                    "hostinfo.result chunk is too large: {}",
+                    body.len()
+                )));
+            }
+            let flags = u8::from(*last) | u8::from(*error) << 1;
+            let mut payload = request_id.to_le_bytes().to_vec();
+            payload.extend_from_slice(&[*section, flags, 0, 0]);
+            payload.extend_from_slice(body);
+            (HOSTINFO_RESULT, payload)
+        }
+    };
+    Ok(Message::new(HOSTINFO_SERVICE, kind, payload))
+}
+
+fn hostinfo_document(json: &str) -> io::Result<Vec<u8>> {
+    if json.len() > HOSTINFO_MAX_DOCUMENT {
+        return Err(invalid(format!(
+            "host info document is too large: {}",
+            json.len()
+        )));
+    }
+    Ok(json.as_bytes().to_vec())
 }
 
 fn clipboard_reply(reply: &ClipboardReply) -> io::Result<Message> {
@@ -337,9 +383,36 @@ pub fn decode(message: &Message) -> io::Result<Option<ControlRecord>> {
         (UPDATE_SERVICE, kind) => {
             return Ok(update_record(kind, payload)?.map(ControlRecord::Update))
         }
+        (HOSTINFO_SERVICE, kind) => return hostinfo_request(kind, payload),
         _ => return Ok(None),
     };
     Ok(Some(record))
+}
+
+/// Both requests are exactly eight bytes. The flags of a subscription are
+/// all reserved and ignored (bit 0 once asked for a top list in the
+/// metrics), and so are the reserved bytes of a query and the meaning of
+/// its section: the service answers an unknown one with an error result.
+fn hostinfo_request(kind: u16, payload: &[u8]) -> io::Result<Option<ControlRecord>> {
+    if !matches!(kind, HOSTINFO_SUBSCRIBE | HOSTINFO_QUERY) {
+        return Ok(None);
+    }
+    if payload.len() != 8 {
+        return Err(invalid(format!(
+            "invalid hostinfo request payload length: {}",
+            payload.len()
+        )));
+    }
+    let mut fields = Fields::new(payload);
+    let first = fields.u32()?;
+    Ok(Some(if kind == HOSTINFO_SUBSCRIBE {
+        ControlRecord::HostInfoSubscribe { interval_ms: first }
+    } else {
+        ControlRecord::HostInfoQuery {
+            request_id: first,
+            section: fields.u8()?,
+        }
+    }))
 }
 
 fn video_config(payload: &[u8]) -> io::Result<VideoConfig> {
@@ -601,25 +674,33 @@ pub fn reset_status(payload: &[u8]) -> io::Result<(u8, [u8; 16])> {
 }
 
 /// The start of the session.ready answering the hello with `token`, as it
-/// appears on the wire: the envelope, the version and the token.
-fn session_ready(token: &[u8; 16]) -> [u8; ENVELOPE_LEN + 20] {
+/// appears on the wire: the envelope, the version and the token. `minor`
+/// is the minor version the KVM settled on.
+fn session_ready(token: &[u8; 16], minor: u16) -> [u8; ENVELOPE_LEN + 20] {
     let mut ready = [0; ENVELOPE_LEN + 20];
     ready[0..2].copy_from_slice(&SESSION_SERVICE.to_le_bytes());
     ready[2..4].copy_from_slice(&SESSION_READY.to_le_bytes());
     ready[4..8].copy_from_slice(&(identity::READY_PAYLOAD_LEN as u32).to_le_bytes());
-    ready[8..12].copy_from_slice(&version_bytes());
+    ready[8..10].copy_from_slice(&PROTOCOL_MAJOR.to_le_bytes());
+    ready[10..12].copy_from_slice(&minor.to_le_bytes());
     ready[12..].copy_from_slice(token);
     ready
 }
 
 /// Where the session.ready for `token` starts in `bytes`. The KVM's reply
 /// to an earlier session can precede it, so the stream is searched rather
-/// than parsed until the new session is synchronized.
+/// than parsed until the new session is synchronized. The KVM answers
+/// with the lower of the two minor versions, so a KVM older than this
+/// sender answers with its own.
 pub fn ready_offset(bytes: &[u8], token: &[u8; 16]) -> Option<usize> {
-    let expected = session_ready(token);
-    bytes
-        .windows(expected.len())
-        .position(|window| window == expected)
+    (0..=PROTOCOL_MINOR)
+        .filter_map(|minor| {
+            let expected = session_ready(token, minor);
+            bytes
+                .windows(expected.len())
+                .position(|window| window == expected)
+        })
+        .min()
 }
 
 /// Bytes kept while searching for session.ready: a prefix of it can end
@@ -1181,7 +1262,7 @@ mod tests {
     #[test]
     fn ready_search_skips_an_earlier_session_and_partial_records() {
         let token = [7; 16];
-        let ready = session_ready(&token);
+        let ready = session_ready(&token, PROTOCOL_MINOR);
         let mut stale = ready;
         stale[27] = 8;
         assert_eq!(ready_offset(&stale, &token), None);
@@ -1191,6 +1272,22 @@ mod tests {
         stream.extend_from_slice(&ready);
         assert_eq!(ready_offset(&stream, &token), Some(offset));
         assert_eq!(ready_offset(&ready[..READY_SEARCH_KEEP], &token), None);
+    }
+
+    #[test]
+    fn ready_search_accepts_the_minor_version_of_an_older_kvm() {
+        let token = [7; 16];
+        assert_eq!(&hello(&token, &[9; 32]).payload[..4], [5, 0, 1, 0]);
+        for minor in 0..=PROTOCOL_MINOR {
+            let mut stream = vec![0xff; 5];
+            stream.extend_from_slice(&session_ready(&token, minor));
+            assert_eq!(ready_offset(&stream, &token), Some(5), "minor {minor}");
+        }
+        let newer = session_ready(&token, PROTOCOL_MINOR + 1);
+        assert_eq!(ready_offset(&newer, &token), None);
+        let mut other_major = session_ready(&token, 0);
+        other_major[8] = 6;
+        assert_eq!(ready_offset(&other_major, &token), None);
     }
 
     #[test]
@@ -1206,5 +1303,145 @@ mod tests {
         status[4] = 1;
         status[8..].fill(0);
         assert!(reset_status(&status).is_err());
+    }
+
+    #[test]
+    fn hostinfo_capabilities_register_and_withdraw() {
+        let sections = HOSTINFO_INVENTORY_SECTION
+            | HOSTINFO_METRICS_SECTION
+            | HOSTINFO_PROCESSES_SECTION
+            | HOSTINFO_USB_SECTION;
+        let registered = registration(&Registration::HostInfo { sections }).unwrap();
+        assert_eq!(
+            registered,
+            message(HOSTINFO_SERVICE, HOSTINFO_CAPABILITIES, &[15, 0, 0, 0])
+        );
+        assert_eq!(registered.encode().unwrap()[..4], [7, 0, 1, 0]);
+        let withdrawn = registration(&Registration::HostInfo { sections: 0 }).unwrap();
+        assert_eq!(withdrawn.payload, [0; 4]);
+    }
+
+    #[test]
+    fn hostinfo_documents_are_written_as_json() {
+        let reply = |reply| service_reply(&ServiceReply::HostInfo(reply));
+        assert_eq!(
+            reply(HostInfoReply::Inventory(r#"{"schema":1}"#.into())).unwrap(),
+            message(HOSTINFO_SERVICE, HOSTINFO_INVENTORY, br#"{"schema":1}"#)
+        );
+        assert_eq!(
+            reply(HostInfoReply::Metrics("{}".into())).unwrap(),
+            message(HOSTINFO_SERVICE, HOSTINFO_METRICS, b"{}")
+        );
+        let largest = "x".repeat(HOSTINFO_MAX_DOCUMENT);
+        assert!(reply(HostInfoReply::Metrics(largest.clone())).is_ok());
+        assert!(reply(HostInfoReply::Inventory(largest + "x")).is_err());
+    }
+
+    #[test]
+    fn hostinfo_results_carry_id_section_and_flags() {
+        let result = |last, error, body: &[u8]| {
+            service_reply(&ServiceReply::HostInfo(HostInfoReply::Result {
+                request_id: 0x0102_0304,
+                section: HOSTINFO_QUERY_PROCESSES,
+                last,
+                error,
+                body: body.to_vec(),
+            }))
+        };
+        let chunk = result(false, false, b"{\"a\"").unwrap();
+        assert_eq!((chunk.service, chunk.kind), (7, 6));
+        assert_eq!(
+            chunk.payload,
+            [4, 3, 2, 1, 2, 0, 0, 0, b'{', b'"', b'a', b'"']
+        );
+        assert_eq!(result(true, false, b"}").unwrap().payload[5], 1);
+        assert_eq!(
+            result(true, true, b"no").unwrap().payload[4..8],
+            [2, 3, 0, 0]
+        );
+        assert_eq!(result(true, false, b"").unwrap().payload.len(), 8);
+        assert!(result(true, false, &vec![b' '; HOSTINFO_MAX_CHUNK]).is_ok());
+        assert!(result(true, false, &vec![b' '; HOSTINFO_MAX_CHUNK + 1]).is_err());
+    }
+
+    #[test]
+    fn reads_hostinfo_requests() {
+        let subscribe = |interval: u32, flags: u32| {
+            let payload = two_u32(interval, flags);
+            record(HOSTINFO_SERVICE, HOSTINFO_SUBSCRIBE, &payload).unwrap()
+        };
+        assert_eq!(
+            subscribe(1000, 0),
+            Some(ControlRecord::HostInfoSubscribe { interval_ms: 1000 })
+        );
+        assert_eq!(
+            subscribe(0, 0),
+            Some(ControlRecord::HostInfoSubscribe { interval_ms: 0 })
+        );
+        // Every flag is reserved: bit 0, which an earlier KVM set to get a
+        // top list in the metrics, changes nothing, nor does any other.
+        assert_eq!(subscribe(1000, 1), subscribe(1000, 0));
+        assert_eq!(
+            subscribe(250, u32::MAX),
+            Some(ControlRecord::HostInfoSubscribe { interval_ms: 250 })
+        );
+        assert_eq!(
+            record(HOSTINFO_SERVICE, HOSTINFO_QUERY, &[9, 0, 0, 0, 3, 0, 0, 0]).unwrap(),
+            Some(ControlRecord::HostInfoQuery {
+                request_id: 9,
+                section: HOSTINFO_QUERY_USB
+            })
+        );
+        // The top list, and a section this version does not know: both
+        // reach the service, which answers the unknown one with an error.
+        for section in [HOSTINFO_QUERY_TOP, 200] {
+            assert_eq!(
+                record(
+                    HOSTINFO_SERVICE,
+                    HOSTINFO_QUERY,
+                    &[1, 0, 0, 0, section, 9, 9, 9]
+                )
+                .unwrap(),
+                Some(ControlRecord::HostInfoQuery {
+                    request_id: 1,
+                    section
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn hostinfo_requests_have_eight_bytes_and_other_kinds_are_skipped() {
+        for kind in [HOSTINFO_SUBSCRIBE, HOSTINFO_QUERY] {
+            assert!(record(HOSTINFO_SERVICE, kind, &[0; 7]).is_err());
+            assert!(record(HOSTINFO_SERVICE, kind, &[0; 9]).is_err());
+            assert!(record(HOSTINFO_SERVICE, kind, &[]).is_err());
+        }
+        for kind in [
+            HOSTINFO_CAPABILITIES,
+            HOSTINFO_INVENTORY,
+            HOSTINFO_METRICS,
+            HOSTINFO_RESULT,
+            7,
+        ] {
+            assert_eq!(record(HOSTINFO_SERVICE, kind, &[1, 2, 3]).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn the_host_info_policy_is_off_unless_the_kvm_turns_it_on() {
+        let config = |json: &str| match record(SESSION_SERVICE, SESSION_CONFIG, json.as_bytes()) {
+            Ok(Some(ControlRecord::SessionConfig(settings))) => settings,
+            other => panic!("not a session.config: {other:?}"),
+        };
+        let policy = r#""terminal_enabled":true,"files_enabled":false,"capture_display":"""#;
+        assert!(!config(&format!("{{{policy}}}")).hostinfo_enabled);
+        assert!(!config(&format!(r#"{{{policy},"hostinfo_enabled":false}}"#)).hostinfo_enabled);
+        assert!(config(&format!(r#"{{{policy},"hostinfo_enabled":true}}"#)).hostinfo_enabled);
+    }
+
+    #[test]
+    fn the_reserved_camera_service_is_skipped() {
+        assert_eq!(record(6, 2, &[1, 2]).unwrap(), None);
     }
 }
