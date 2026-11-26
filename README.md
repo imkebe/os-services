@@ -1,7 +1,7 @@
 # IP-KVM OS Services
 
 > [!NOTE]
-> IP-KVM OS Services is experimental. Expect bugs and breaking changes. Report problems in [issues](https://github.com/jetkvm/os-services/issues).
+> IP-KVM OS Services is experimental. Expect bugs and breaking changes. Report problems in [issues](https://github.com/imkebe/os-services/issues).
 
 IP-KVM OS Services is a small service for the computer that a KVM is connected to. It gives the KVM functions that the KVM hardware cannot supply:
 
@@ -9,6 +9,7 @@ IP-KVM OS Services is a small service for the computer that a KVM is connected t
 - A shared clipboard
 - A terminal
 - File transfer to the computer
+- Information about the computer: processor, memory, disks, graphics and processes
 
 The service and the [IP-KVM OS Services protocol](PROTOCOL.md) are vendor-neutral, so any KVM can implement the protocol.
 
@@ -17,22 +18,30 @@ The service and the [IP-KVM OS Services protocol](PROTOCOL.md) are vendor-neutra
 | KVM | Firmware | OS Services |
 |---|---|---|
 | JetKVM Mini | [jetkvm/mini](https://github.com/jetkvm/mini) | Supported |
-| JetKVM | [jetkvm/kvm](https://github.com/jetkvm/kvm) | Not supported |
+| JetKVM with the advanced-1 firmware | [imkebe/kvm](https://github.com/imkebe/kvm) | Supported, with host info |
+| JetKVM with the official firmware | [jetkvm/kvm](https://github.com/jetkvm/kvm) | Not supported |
 
 ## Requirements
 
 - A [supported KVM](#supported-kvms).
 - One of these computers:
 
-  | OS | Architecture | Video encoder |
-  |---|---|---|
-  | Windows 11 | x64 | Intel Quick Sync, NVIDIA NVENC or AMD AMF |
-  | macOS 12.3 or later | Apple silicon | VideoToolbox |
-  | Linux with KMS | x64 | VAAPI (Intel or AMD graphics), or NVENC (NVIDIA proprietary driver, Wayland only). If the VAAPI driver has no H.264 encoder, the CPU encodes with OpenH264. |
+  | OS | Architecture | Video encoder | Updates itself |
+  |---|---|---|---|
+  | Windows 11 | x64 | Intel Quick Sync, NVIDIA NVENC or AMD AMF | Yes |
+  | macOS 12.3 or later | Apple silicon | VideoToolbox | Yes |
+  | macOS 12.3 or later | Intel | VideoToolbox | No |
+  | Linux with KMS | x64 | VAAPI (Intel or AMD graphics), or NVENC (NVIDIA proprietary driver, Wayland only). If the VAAPI driver has no H.264 encoder, the CPU encodes with OpenH264. | Yes |
+  | Linux with KMS | arm64 | As on x64. Not tested on hardware. | No |
+  | Linux with KMS | armhf (ARMv7) | As on x64. Not tested on hardware. | No |
+
+  Windows on ARM is not supported. macOS on Intel and Linux on arm64 and armhf are added by this branch.
+
+  The releases of this branch are not signed by JetKVM, so a KVM does not update them by itself. To update, install a newer [release](https://github.com/imkebe/os-services/releases/latest) by hand.
 
 ## Install
 
-Download the installer for your operating system from the [latest release](https://github.com/jetkvm/os-services/releases/latest), on the computer that the KVM is connected to. When the service asks **Allow this KVM?**, allow it only if the fingerprint is the same as the fingerprint in the KVM's OS Services settings.
+Download the installer for your operating system from the [latest release](https://github.com/imkebe/os-services/releases/latest), on the computer that the KVM is connected to. When the service asks **Allow this KVM?**, allow it only if the fingerprint is the same as the fingerprint in the KVM's OS Services settings.
 
 ### Windows
 

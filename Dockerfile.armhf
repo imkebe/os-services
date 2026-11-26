@@ -1,0 +1,110 @@
+# The 32-bit ARM Linux (armhf) build. It cross-compiles on arm64 Ubuntu 22.04
+# with Ubuntu's arm-linux-gnueabihf compiler and the armhf libraries of the
+# same release, so the AppImage runs on glibc 2.35 and newer like the other
+# Linux builds. The tests, linuxdeploy and the AppImage check run as armhf
+# programs through the kernel's binfmt emulation, which Docker Desktop and
+# OrbStack register. It leaves out lint, which does not depend on the
+# architecture, and the Go tools. On Apple Silicon it runs without
+# emulating the compiler:
+#   docker build -f Dockerfile.armhf --target dist --output type=local,dest=dist .
+
+# Git repositories to clone from instead of GitHub, which sometimes refuses
+# anonymous clones: empty unless the build passes
+# --build-context gitcache=DIR with DIR/vcpkg and DIR/libdrmtap (bare clones).
+FROM scratch AS gitcache
+
+FROM --platform=linux/arm64 ubuntu:22.04 AS toolchain
+
+ARG DEBIAN_FRONTEND=noninteractive
+ENV PATH=/root/.cargo/bin:${PATH}
+
+# The build tools are arm64; the libraries the program and libdrmtap link
+# are armhf. Ubuntu's ports archive carries both.
+RUN dpkg --add-architecture armhf && apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    file \
+    git \
+    libclang-dev \
+    meson \
+    ninja-build \
+    perl \
+    pkg-config \
+    python3 \
+    tar \
+    unzip \
+    zip \
+    gcc-arm-linux-gnueabihf \
+    g++-arm-linux-gnueabihf \
+    binutils-arm-linux-gnueabihf \
+    libc6-dev:armhf \
+    libcap-dev:armhf \
+    libdrm-dev:armhf \
+    libegl-dev:armhf \
+    libgles-dev:armhf \
+    libseccomp-dev:armhf \
+    libva-dev:armhf \
+    && rm -rf /var/lib/apt/lists/*
+
+# linuxdeploy lists the libraries a program needs with ldd, which knows only
+# the arm64 loader here.
+RUN sed -i 's|^RTLDLIST=.*|RTLDLIST="/lib/ld-linux-aarch64.so.1 /lib/ld-linux-armhf.so.3"|' /usr/bin/ldd \
+    && grep -q ld-linux-armhf /usr/bin/ldd
+
+ENV VCPKG_ROOT=/opt/vcpkg \
+    CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
+    CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc \
+    CXX_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++ \
+    AR_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-ar \
+    PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_LIBDIR_armv7_unknown_linux_gnueabihf=/usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig \
+    OBJDUMP=arm-linux-gnueabihf-objdump
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain none
+
+WORKDIR /work
+
+# The toolchain that rust-toolchain.toml names, with the armhf standard library.
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install && rustup target add armv7-unknown-linux-gnueabihf
+
+FROM toolchain AS deps
+
+# FFmpeg for the arm-linux triplet. vcpkg's Linux toolchain picks the
+# arm-linux-gnueabihf compiler; FFmpeg finds the armhf libva and libdrm
+# through PKG_CONFIG_LIBDIR.
+COPY vendor/vcpkg ./vendor/vcpkg
+RUN --mount=type=bind,from=gitcache,target=/gitcache \
+    baseline=$(sed -n 's/.*"builtin-baseline": *"\([0-9a-f]*\)".*/\1/p' vendor/vcpkg/vcpkg.json) \
+    && test -n "$baseline" \
+    && source=https://github.com/microsoft/vcpkg \
+    && if [ -d /gitcache/vcpkg ]; then source=/gitcache/vcpkg; fi \
+    && git clone --quiet "$source" "$VCPKG_ROOT" \
+    && git -C "$VCPKG_ROOT" checkout --quiet --detach "$baseline" \
+    && "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics \
+    && PKG_CONFIG_LIBDIR=/usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig \
+        "$VCPKG_ROOT/vcpkg" install --clean-after-build \
+        --triplet arm-linux --host-triplet arm64-linux \
+        --x-manifest-root=/work/vendor/vcpkg --x-install-root="$VCPKG_ROOT/installed"
+
+# libdrmtap and its helper, for armhf.
+COPY src/video/kms/native ./src/video/kms/native
+COPY packaging ./packaging
+RUN --mount=type=bind,from=gitcache,target=/gitcache \
+    if [ -d /gitcache/libdrmtap ]; then export LIBDRMTAP_REPO=/gitcache/libdrmtap; fi \
+    && MESON_CROSS_FILE=/work/packaging/linux/armhf-cross.ini \
+    packaging/libdrmtap/build.sh --stage packaging/linux/drmtap \
+    && file packaging/linux/drmtap/drmtap-helper | grep -q 'ARM, EABI5' \
+    && rm -rf src
+
+FROM deps AS build
+# The version a dev release builds; see src/protocol/mod.rs.
+ARG IPKVM_OS_SERVICES_VERSION
+COPY . .
+RUN cargo xtask test --target armv7-unknown-linux-gnueabihf --skip-go
+RUN cargo xtask package --target armv7-unknown-linux-gnueabihf
+
+FROM scratch AS dist
+COPY --from=build /work/dist/ /

@@ -24,6 +24,9 @@ pub fn build() -> Result<Vec<PathBuf>> {
         "--tests",
         "--message-format=json-render-diagnostics",
     ]);
+    if let Some(target) = crate::target() {
+        cargo.args(["--target", target]);
+    }
     let mut child = cargo
         .stdout(Stdio::piped())
         .spawn()
@@ -54,7 +57,14 @@ fn test_executable(line: &str) -> Option<PathBuf> {
 }
 
 pub fn test(options: Options) -> Result {
-    for executable in build()? {
+    let executables = build()?;
+    if !crate::runs_here() {
+        return Err(format!(
+            "the tests of a {} build do not run on this computer",
+            crate::target_arch()
+        ));
+    }
+    for executable in executables {
         let mut command = Command::new(executable);
         if options.hardware {
             command.arg("--include-ignored");

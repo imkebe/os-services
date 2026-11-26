@@ -86,9 +86,10 @@ fn vcpkg_installed(target_os: &str) -> PathBuf {
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
     println!("cargo:rerun-if-changed=xtask/src/vcpkg_layout.rs");
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     vcpkg_layout::root(&repository, target_os)
         .join("installed")
-        .join(vcpkg_layout::triplet(target_os))
+        .join(vcpkg_layout::triplet(target_os, &target_arch))
 }
 
 type Libraries = (&'static [&'static str], &'static [&'static str]);

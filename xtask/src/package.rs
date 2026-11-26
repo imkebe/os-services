@@ -48,7 +48,7 @@ pub fn docker() -> Result {
 }
 
 fn bundle_dir() -> PathBuf {
-    root().join("target").join("release").join("bundle")
+    crate::release_dir().join("bundle")
 }
 
 /// The name of the notices file in each installer.
@@ -78,6 +78,9 @@ fn tauri_bundle(formats: &[&str]) -> Result {
     }
     let mut command = process::cargo();
     command.args(["tauri", "bundle", "--bundles", &formats.join(",")]);
+    if let Some(target) = crate::target() {
+        command.args(["--target", target]);
+    }
     if cfg!(windows) {
         command.arg("--no-sign");
     }
@@ -111,9 +114,7 @@ fn windows(dist: &Path) -> Result {
     vcpkg_notices()?;
     tauri_bundle(&["nsis"])?;
     smoke_test(&mut Command::new(
-        root()
-            .join("target/release")
-            .join(format!("{EXECUTABLE}.exe")),
+        crate::release_dir().join(format!("{EXECUTABLE}.exe")),
     ))?;
     copy_into(dist, &only_file(&bundle_dir().join("nsis"), "exe")?)
 }
@@ -136,7 +137,11 @@ fn macos(dist: &Path, skip_notarization: bool) -> Result {
     smoke_test(&mut Command::new(
         app.join("Contents/MacOS").join(EXECUTABLE),
     ))?;
-    let archive = dist.join(format!("{}_arm64.app.tar.gz", PRODUCT.replace(' ', "-")));
+    let arch = match crate::target_arch() {
+        "x86_64" => "x64",
+        _ => "arm64",
+    };
+    let archive = dist.join(format!("{}_{arch}.app.tar.gz", PRODUCT.replace(' ', "-")));
     process::run(
         Command::new("tar")
             .arg("-czf")
@@ -271,8 +276,17 @@ fn linux(dist: &Path) -> Result {
         fs::remove_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     }
     let script = root().join("packaging/linux/package.sh");
-    process::run(Command::new(&script).arg("deploy"))?;
-    let appdir = root().join("target").join("release").join("appdir");
+    let release = crate::release_dir();
+    let package_sh = |step: &str| {
+        let mut command = Command::new(&script);
+        command
+            .arg(step)
+            .env("RELEASE_DIR", &release)
+            .env("TARGET_ARCH", crate::target_arch());
+        command
+    };
+    process::run(&mut package_sh("deploy"))?;
+    let appdir = release.join("appdir");
     notices::write(
         &appdir.join(DOC).join(NOTICES),
         notices::Native::AppImage {
@@ -281,7 +295,7 @@ fn linux(dist: &Path) -> Result {
             triplet: native::triplet(),
         },
     )?;
-    process::run(Command::new(&script).arg("appimage"))?;
+    process::run(&mut package_sh("appimage"))?;
     let appimage = only_file(&dir, "AppImage")?;
     check_appimage(&appimage)?;
     copy_into(dist, &appimage)
@@ -290,24 +304,26 @@ fn linux(dist: &Path) -> Result {
 /// Where the AppImage keeps the notices.
 const DOC: &str = "usr/share/doc/ipkvm-os-services";
 
-/// The AppImage must carry the capture helper and its library at the paths
-/// the sender looks in; without them the sender installs but cannot capture.
-/// It must also carry the notices.
-const BUNDLED: [&str; 3] = [
+/// The AppImage must carry the capture helper, its library and the encoder
+/// library at the paths the sender looks in; without them the sender
+/// installs but cannot capture. It must also carry the notices.
+const BUNDLED: [&str; 4] = [
     "usr/lib/ipkvm-os-services/drmtap-helper",
     "usr/lib/ipkvm-os-services/libdrmtap.so.0",
+    "usr/lib/ipkvm-os-services/libipkvm-kms.so",
     "usr/share/doc/ipkvm-os-services/THIRD_PARTY_NOTICES.md",
 ];
 
 fn check_appimage(appimage: &Path) -> Result {
-    let mut run = Command::new(appimage);
-    run.env("APPIMAGE_EXTRACT_AND_RUN", "1");
-    smoke_test(&mut run)?;
     let scratch = root().join("target").join("appimage-check");
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(&scratch).map_err(|error| error.to_string())?;
+    let runnable = runnable_appimage(appimage, &scratch)?;
+    let mut run = Command::new(&runnable);
+    run.env("APPIMAGE_EXTRACT_AND_RUN", "1");
+    smoke_test(&mut run)?;
     process::output(
-        Command::new(appimage)
+        Command::new(&runnable)
             .arg("--appimage-extract")
             .current_dir(&scratch),
     )?;
@@ -318,8 +334,40 @@ fn check_appimage(appimage: &Path) -> Result {
     }
 }
 
+/// The AppImage, or for another architecture a copy of it without the
+/// AppImage magic in the padding of its ELF header: the binfmt rules that
+/// run other architectures through emulation require those bytes to be
+/// zero.
+fn runnable_appimage(appimage: &Path, scratch: &Path) -> Result<PathBuf> {
+    if crate::target_arch() == std::env::consts::ARCH {
+        return Ok(appimage.to_path_buf());
+    }
+    let mut bytes = fs::read(appimage).map_err(|error| error.to_string())?;
+    bytes
+        .get_mut(8..11)
+        .ok_or("the AppImage is too short")?
+        .fill(0);
+    let copy = scratch.join("check.AppImage");
+    fs::write(&copy, bytes).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&copy, fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(copy)
+}
+
 /// The built program starts and rejects an unknown option with its usage.
+/// A program for an architecture this computer cannot run is not started.
 fn smoke_test(program: &mut Command) -> Result {
+    if !crate::runs_here() {
+        println!(
+            "Not started: a {} program does not run on this computer",
+            crate::target_arch()
+        );
+        return Ok(());
+    }
     let output = program
         .args(["--invalid", "value"])
         .output()

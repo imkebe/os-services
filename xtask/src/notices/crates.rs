@@ -23,14 +23,18 @@ use std::{
 const SERVICE: &str = "ipkvm-os-services";
 
 pub(super) fn entries() -> Result<Vec<Entry>> {
-    let host = host_triple()?;
+    // The crates of the platform the build is for.
+    let platform = match crate::target() {
+        Some(target) => target.to_owned(),
+        None => host_triple()?,
+    };
     let metadata = process::output(process::cargo().args([
         "metadata",
         "--locked",
         "--format-version",
         "1",
         "--filter-platform",
-        &host,
+        &platform,
     ]))?;
     let metadata: Value = serde_json::from_str(&metadata).map_err(|error| error.to_string())?;
     let added = notices_dir().join("crates.json");

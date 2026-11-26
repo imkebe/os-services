@@ -14,12 +14,16 @@ pub fn root(repository: &Path, target_os: &str) -> PathBuf {
     }
 }
 
-/// The vcpkg triplet of a target system, as `std::env::consts::OS` and
-/// CARGO_CFG_TARGET_OS name it.
-pub fn triplet(target_os: &str) -> &'static str {
-    match target_os {
-        "windows" => "x64-windows-static",
-        "linux" => "x64-linux",
+/// The vcpkg triplet of a target system and architecture, as
+/// `std::env::consts` and CARGO_CFG_TARGET_OS/ARCH name them. Windows builds
+/// for x64 only.
+pub fn triplet(target_os: &str, target_arch: &str) -> &'static str {
+    match (target_os, target_arch) {
+        ("windows", _) => "x64-windows-static",
+        ("linux", "aarch64") => "arm64-linux",
+        ("linux", "arm") => "arm-linux",
+        ("linux", _) => "x64-linux",
+        (_, "x86_64") => "x64-osx",
         _ => "arm64-osx",
     }
 }

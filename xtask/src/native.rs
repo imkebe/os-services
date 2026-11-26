@@ -26,8 +26,14 @@ pub fn vcpkg_root() -> PathBuf {
     vcpkg_layout::root(&root(), std::env::consts::OS)
 }
 
+/// The triplet of the libraries the build links.
 pub fn triplet() -> &'static str {
-    vcpkg_layout::triplet(std::env::consts::OS)
+    vcpkg_layout::triplet(std::env::consts::OS, crate::target_arch())
+}
+
+/// The triplet of the tools that run during the vcpkg build.
+fn host_triplet() -> &'static str {
+    vcpkg_layout::triplet(std::env::consts::OS, std::env::consts::ARCH)
 }
 
 /// The vcpkg commit the manifest pins.
@@ -86,7 +92,7 @@ fn install_libraries() -> Result {
     process::run(
         Command::new(tool)
             .arg("install")
-            .args(["--triplet", triplet(), "--host-triplet", triplet()])
+            .args(["--triplet", triplet(), "--host-triplet", host_triplet()])
             .arg(format!(
                 "--x-manifest-root={}",
                 root().join("vendor").join("vcpkg").display()
